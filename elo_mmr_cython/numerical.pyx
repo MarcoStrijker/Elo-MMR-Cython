@@ -1,5 +1,5 @@
 
-from libc.math cimport cosh, tanh, atanh, exp, erfc
+from libc.math cimport cosh, tanh, atanh, exp, erfc, logf, sqrtf
 from libc.math cimport M_SQRT2, M_2_SQRTPI, M_PI
 
 
@@ -31,11 +31,25 @@ cpdef double standard_normal_cdf(double z):
     return 0.5 * erfc(z / M_SQRT2)
 
 
-cpdef double erfc_inv(x):
-    # TODO: solve problem with precision
-    # https://stackoverflow.com/questions/60472139/computing-the-inverse-of-the-complementary-error-function-erfcinv-in-c
-    # https://stackoverflow.com/questions/27229371/inverse-error-function-in-c
-    return ...
+cpdef double erfc_inv(double x):
+    """ Implementation of the inverse complementary error function.
+    
+    From https://stackoverflow.com/questions/27229371/inverse-error-function-in-c/49743348 
+    Answer from nimig18
+
+    Args:
+    """
+    cdef double tt1, tt2, lnx, sgn
+    sgn = -1.0 if x < 0 else 1.0
+
+    x = (1 - x) * (1 + x) # x = 1 - x*x
+    lnx = logf(x)
+
+    tt1 = 2 / (M_PI * 0.147) + 0.5 * lnx
+    tt2 = 1 / 0.147 * lnx
+
+    return sgn * sqrtf(-tt1 + sqrtf(tt1*tt1 - tt2))
+
 
 cpdef double standard_normal_cdf_inv(double prob):
     return -M_SQRT2 * erfc_inv(2 * prob)
