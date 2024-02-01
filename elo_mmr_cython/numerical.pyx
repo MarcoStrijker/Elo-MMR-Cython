@@ -34,6 +34,7 @@ cpdef double standard_normal_cdf(double z):
 cpdef double erfc_inv(x):
     # TODO: solve problem with precision
     # https://stackoverflow.com/questions/60472139/computing-the-inverse-of-the-complementary-error-function-erfcinv-in-c
+    # https://stackoverflow.com/questions/27229371/inverse-error-function-in-c
     return ...
 
 cpdef double standard_normal_cdf_inv(double prob):
