@@ -31,8 +31,13 @@ cpdef double standard_normal_cdf(double z):
     return 0.5 * erfc(z / M_SQRT2)
 
 
-# cpdef double standard_normal_cdf_inv(double prob):
-#     return -M_SQRT2 * erfc_inv(2 * prob)
+cpdef double erfc_inv(x):
+    # TODO: solve problem with precision
+    # https://stackoverflow.com/questions/60472139/computing-the-inverse-of-the-complementary-error-function-erfcinv-in-c
+    return ...
+
+cpdef double standard_normal_cdf_inv(double prob):
+    return -M_SQRT2 * erfc_inv(2 * prob)
 
 
 cdef double clamp(double x, double low, double high):
