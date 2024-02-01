@@ -1,28 +1,18 @@
 # cython: language_level=3
 
 from libc.math cimport tanh, cosh, sqrt
+from libc.stdint cimport SIZE_MAX
 
 import random
 import warnings
 
-
-from enum import Enum
 from bisect import bisect_left
 from itertools import groupby
 
+from .numerical import TANH_MULTIPLIER, solve_newton, standard_normal_pdf, recip, standard_normal_cdf
+
 
 cdef public int SECS_PER_DAY = 86_400
-
-
-from re import sub
-
-
-from enum import Enum
-from collections import deque
-
-from elo_mmr_cython.numerical import standard_normal_cdf
-
-from .numerical import TANH_MULTIPLIER, solve_newton, standard_normal_pdf, recip
 
 # Custom type, which is actually a int but functions as typhint for the enum
 ctypedef int OrderingType
@@ -288,6 +278,10 @@ cdef class Rating(Term):
             cdf = standard_normal_cdf(z)
             val = pdf / cdf
             return pdf, pdf_prime / cdf - val ** 2
+
+    cdef TanhTerm to_tanh_term(Rating rating):
+        cdef double w = TANH_MULTIPLIER / rating.sig
+        return TanhTerm(rating.mu, w * 0.5, w)
 
 
 cpdef list get_participant_ratings(dict players, tuple contest_standings,
@@ -678,7 +672,6 @@ cdef class EloMMR:
         return range(beg, end)
 
     cdef void round_update(self, ContestRatingParams rating_params, tuple standings):
-        # TODO: change object to ContestRatingParams
         """Update ratings for a single round.
 
         Update ratings due to waiting period between contests,
@@ -691,15 +684,19 @@ cdef class EloMMR:
             standings {tuple} -- standings of the round
         """
         cdef double weight, sig_perf, sig_drift
-        cdef list normal_terms
+        cdef list base_terms, normal_terms, tanh_terms, ranks
         cdef Rating last_term
-        cdef list ranks
-        cdef unsigned int number_of_ranks
+        cdef unsigned int number_of_ranks, my_rank, idx_len_upper_bound
+        cdef int idx_len_max
+        cdef double player_mu, mu_perf
+        cdef object idx_subsample, f
+        cdef Player player
+        cdef tuple bounds
 
-        cdef list base_terms = []
+        base_terms = []
 
         for (player, low, _) in standings:
-            weight = self.compute_weight(rating_params.weight, player.times_played)
+            weight = self.compute_weight(rating_params.weight, player.times_played())
             sig_perf = self.compute_sig_perf(weight)
             sig_drift = self.compute_sig_drift(weight, player.delta_time)
 
@@ -728,6 +725,7 @@ cdef class EloMMR:
 
             normal_terms = []
 
+            ## Sort terms by rating to allow for subsampling within a range or ratings.
             for (term, low) in base_terms:
                 if len(normal_terms) == 0:
                     normal_terms.append((term, [low]))
@@ -743,8 +741,68 @@ cdef class EloMMR:
 
                 normal_terms.append((term, [low]))
 
+            # Create the equivalent logistic terms.
+            tanh_terms = []
+            for (rating, ranks) in normal_terms:
+                tanh_terms.append((rating.to_tanh_term, ranks))
 
-    
+            idx_len_max = 9999
+
+            ## The computational bottleneck: update ratings based on contest performance
+            for (player, my_rank, _) in standings:
+                player_mu = player.approx_posterior.mu
+                idx_subsample = self.subsample(normal_terms, player_mu, 
+                                               self.subsample_size, self.subsample_bucket)
+                idx_len_max = len(idx_subsample) if idx_subsample is not None else SIZE_MAX
+
+                if idx_len_max < idx_len_upper_bound:
+                    idx_len_max = idx_len_upper_bound
+                    warnings.warn("Subsampling %ld opponents might be slow; consider decreasing subsample_size." % idx_len_upper_bound)
+
+                bounds = (-6000, 9000)
+                weight = self.compute_weight(rating_params, player.times_played_excl())
+                sig_perf = self.compute_sig_perf(weight)
+
+                if isinstance(self.variant, Gaussian):
+                    idx_subsample = [normal_terms[i] for i in idx_subsample]
+
+                    f = get_formula(idx_subsample[:], my_rank, self.split_ties)
+
+                    mu_perf = solve_newton(bounds, f)
+                    player.update_rating_with_normal(
+                        Rating(mu_perf, sig_perf)
+                    )
+                elif isinstance(self.variant, Logistic):
+
+                    idx_subsample = [tanh_terms[i] for i in idx_subsample]
+
+                    f = get_formula(idx_subsample[:], my_rank, self.split_ties)
+
+                    mu_perf = min(solve_newton(bounds, f), rating_params.perf_ceiling)
+                    player.update_rating_with_logistic(
+                        Rating(mu_perf, sig_perf), 
+                        self.subsample_size
+                    )
+
+cdef object get_formula(list idx_subsample_copy, int my_rank, bint split_ties):
+    """Return callable that can be passed as formula into the solve_newton
+
+    Args:
+        idx_subsample_copy {list} -- 
+
+    """
+
+    def f(double x):
+        cdef double[2] temp
+        cdef double[2] res = [0., 0.]
+        for rating, ranks in idx_subsample_copy:
+            temp = rating.evals(x, ranks, my_rank, split_ties)
+            res[0] += temp[0]
+            res[1] += temp[1]
+        return tuple(res)
+
+    return f
+
 cdef EloMMR construct_elo_mmr_default_fast():
     return EloMMR(
         weight_limit=0.2,
@@ -851,7 +909,7 @@ cdef int outcome_free(standings):
     return len(standings) == 0 or standings[0][2] + 1 >= len(standings)
 
 
-cpdef void simulate_contest(dict players, Contest contest, RatingSystem system, 
+cpdef void simulate_contest(dict players, Contest contest, EloMMR system, 
                             double mu_newbie, double sig_newbie, 
                             unsigned long long contest_index):
     """ Simulates a contest
