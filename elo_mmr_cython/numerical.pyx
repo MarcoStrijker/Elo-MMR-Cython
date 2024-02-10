@@ -17,7 +17,7 @@ cpdef double standard_logistic_cdf(double z):
     return 0.5 + 0.5 * tanh(0.5 * TANH_MULTIPLIER * z)
 
 
-cdef double standard_logistic_cdf_inv(double prob):
+cpdef double standard_logistic_cdf_inv(double prob):
     return atanh(2 * prob - 1) * 2 / TANH_MULTIPLIER
 
 
@@ -28,7 +28,7 @@ cpdef double standard_normal_pdf(double z):
 
 cpdef double standard_normal_cdf(double z):
     # TODO: check if erf is right, or if we need to use erfc
-    return 0.5 * erfc(z / M_SQRT2)
+    return 0.5 * erfc(-z / M_SQRT2)
 
 
 cpdef double erfc_inv(double x):
@@ -55,7 +55,7 @@ cpdef double standard_normal_cdf_inv(double prob):
     return -M_SQRT2 * erfc_inv(2 * prob)
 
 
-cdef double clamp(double x, double low, double high):
+cpdef double clamp(double x, double low, double high):
     """Clamps a value between two bounds
 
     Arguments:
@@ -69,7 +69,7 @@ cdef double clamp(double x, double low, double high):
     return max(low, min(x, high))
 
 
-cdef public double recip(double x):
+cpdef public double recip(double x):
     """Returns the reciprocal of a number
 
     Arguments:
@@ -82,7 +82,7 @@ cdef public double recip(double x):
 
 
 
-cdef float solve_newton(tuple bounds, f):
+cpdef float solve_newton(tuple bounds, f):
     """ Returns the root of a function using Newton's method
 
     Arguments:
@@ -95,7 +95,7 @@ cdef float solve_newton(tuple bounds, f):
     cdef double low = bounds[0]
     cdef double high = bounds[1]
     cdef double guess = (bounds[0] + bounds[1]) * 0.5
-    cdef double val, val_prime, extrapolate
+    cdef double extrapolate
 
     while True:
         sum, sum_prime = f(guess)
@@ -116,3 +116,4 @@ cdef float solve_newton(tuple bounds, f):
             warnings.warn("Possible failure to converge @ {guess}: s={sum}, s'={sum_prime}")
 
         return guess
+

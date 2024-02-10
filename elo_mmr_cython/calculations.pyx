@@ -1,6 +1,4 @@
-# cython: language_level=3
-
-from libc.math cimport tanh, cosh, sqrt
+from libc.math cimport tanh, cosh, sqrt, M_PI
 from libc.stdint cimport SIZE_MAX
 
 import random
@@ -9,9 +7,10 @@ import warnings
 from bisect import bisect_left
 from itertools import groupby
 
-from .numerical import TANH_MULTIPLIER, solve_newton, standard_normal_pdf, recip, standard_normal_cdf
+from numerical import solve_newton, standard_normal_pdf, recip, standard_normal_cdf
 
 
+cdef public double TANH_MULTIPLIER = M_PI / 1.7320508075688772
 cdef public int SECS_PER_DAY = 86_400
 
 # Custom type, which is actually a int but functions as typhint for the enum
@@ -44,13 +43,16 @@ cdef class PlayerEvent:
         self.rating_mu = rating_mu
         self.rating_sig = rating_sig
 
+    def __repr__(self):
+        return f"{self.contest_index} {self.rating_mu} {self.rating_sig} {self.perf_score} {self.place}"
+
 
 cdef class Player:
-    cdef Rating normal_factor
-    cdef list logistic_factors
-    cdef list event_history
-    cdef Rating approx_posterior
-    cdef unsigned long update_time, delta_time
+    cdef public Rating normal_factor
+    cdef public list logistic_factors
+    cdef public list event_history
+    cdef public Rating approx_posterior
+    cdef public unsigned long update_time, delta_time
 
     def __cinit__(self, double mu, double sig, unsigned long long update_time):
         """ Initializes a player with a normal prior and no events
@@ -102,9 +104,9 @@ cdef class Player:
         last_event = self.event_history[-1]
 
         # Check that the player's rating is not 0
-        assert last_event.rating_mu != 0
-        assert last_event.rating_sig != 0
-        assert last_event.perf_score != 0
+        # assert last_event.rating_mu == 0
+        # assert last_event.rating_sig == 0
+        # assert last_event.perf_score == 0
 
         self.approx_posterior = rating
 
@@ -120,7 +122,7 @@ cdef class Player:
         self.normal_factor = (wn * self.normal_factor.mu + wp * performance.mu) / (wn + wp)
         self.normal_factor.sig = sqrt(1 / (wn + wp))
 
-        cdef new_rating = self.approximate_posterior(performance.sig) if self.logistic_factors else self.normal_factor
+        cdef Rating new_rating = self.approximate_posterior(performance.sig) if self.logistic_factors else self.normal_factor
 
         self.update_rating(new_rating, performance.mu)
 
@@ -142,7 +144,7 @@ cdef class Player:
             self.normal_factor.mu = (wn * self.normal_factor.mu + wl * logistic.mu) / (wn + wl)
             self.normal_factor.sig = sqrt(1 / (wn + wl))
 
-        self.logistic_factors.append(performance)
+        self.logistic_factors.append(performance.to_tanh_term())
 
         cdef Rating new_rating = self.approximate_posterior(performance.sig)
 
@@ -195,15 +197,16 @@ cdef class Player:
         for r in self.logistic_factors:
             r.w_out *= transfer * decay
 
-
+    def __repr__(self) -> str:
+        return f"{self.approx_posterior.mu} {self.approx_posterior.sig}"
 
             
 
 cdef class Term:
-    cdef tuple eval(self, double x, OrderingType order, int split_ties):
+    cpdef tuple eval(self, double x, OrderingType order, int split_ties):
         raise NotImplementedError("eval not implemented at base class")    
         
-    cdef tuple evals(self, double x, list ranks, int my_rank, int split_ties):
+    cpdef tuple evals(self, double x, list ranks, int my_rank, int split_ties):
         
         if len(ranks) == 1:
             order = create_ordering(ranks[0], my_rank)
@@ -211,7 +214,10 @@ cdef class Term:
 
         cdef int start, end, equal, greater
         cdef double v, p
-        cdef double value, deriv = <double>0.0 
+        cdef double value, deriv
+
+        value = 0
+        deriv = 0
 
         start, end = equal_range(ranks, my_rank)
         equal = end - start
@@ -247,7 +253,7 @@ cdef class Rating(Term):
         cdef double sig_sq_diff = self.sig ** 2 - limit.sig ** 2
         return Rating(limit.mu + mu_diff * decay, (limit.sig ** 2 + sig_sq_diff * decay ** 2) ** 0.5)
 
-    cdef tuple eval(self, double x, OrderingType order, int split_ties):
+    cpdef tuple eval(self, double x, OrderingType order, int split_ties):
         cdef double z, pdf, pdf_prime, cdf, cdf_m1, val, val_m1, pdf_pp
 
         z = (x - self.mu) / self.sig
@@ -279,9 +285,9 @@ cdef class Rating(Term):
             val = pdf / cdf
             return pdf, pdf_prime / cdf - val ** 2
 
-    cdef TanhTerm to_tanh_term(Rating rating):
-        cdef double w = TANH_MULTIPLIER / rating.sig
-        return TanhTerm(rating.mu, w * 0.5, w)
+    cpdef TanhTerm to_tanh_term(self):
+        cdef double w = TANH_MULTIPLIER / self.sig
+        return TanhTerm(self.mu, w * 0.5, w)
 
 
 cpdef list get_participant_ratings(dict players, tuple contest_standings,
@@ -340,7 +346,7 @@ cdef class TanhTerm(Term):
         cdef double w = TANH_MULTIPLIER / rating.sig
         return TanhTerm(rating.mu, w * 0.5, w)
 
-    cdef double get_weight(self):
+    cpdef double get_weight(self):
         return self.w_arg * self.w_out * 2. / (TANH_MULTIPLIER ** 2)
 
     cdef tuple base_values(self, double x):
@@ -358,7 +364,7 @@ cdef class TanhTerm(Term):
         cdef double val_prime = cosh(-z) ** (-2) * self.w_arg * self.w_out
         return val, val_prime
 
-    cdef tuple eval(self, double x, OrderingType order, int split_ties):
+    cpdef tuple eval(self, double x, OrderingType order, int split_ties):
         """ Returns the value of the tanh term and its derivative with respect
         to the input value.
 
@@ -384,7 +390,7 @@ cdef class TanhTerm(Term):
         else:
             return val + self.w_out, val_prime
 
-    cdef tuple evals(self, double x, list ranks, int my_rank, int split_ties):
+    cpdef tuple evals(self, double x, list ranks, int my_rank, int split_ties):
         cdef OrderingType order
 
         if len(ranks) == 1:
@@ -546,7 +552,7 @@ cdef class Contest:
             chunks += 1
         return tuple(self.clone_with_standings(self.standings[i*n : (i+1)*n]) for i in range(chunks))
         
-    cdef void push_contestant(self, str handle):
+    cpdef void push_contestant(self, str handle):
         """ Add a contestant with the given handle in last place.
 
         Arguments:
@@ -615,6 +621,7 @@ cdef class EloMMR:
     cdef public unsigned int subsample_size
     cdef public double subsample_bucket
     cdef public EloMMRVariant variant
+    cdef object sorting
 
     def __cinit__(self, double weight_limit, double sig_limit, bint split_ties, bint fast, EloMMRVariant variant):
         """Initialize EloMMR class"""
@@ -634,11 +641,13 @@ cdef class EloMMR:
         self.subsample_bucket = subsample_bucket
         self.variant = variant
 
+        self.sorting = sort_on_mu_sig_rank(self.subsample_bucket)
+
     cdef double compute_weight(self, double contest_weight, unsigned int n):
         contest_weight *= self.weight_limit
 
         # Check if n is within the index bounds of self.noob_delay
-        if len(self.noob_delay) - 1 <= n:
+        if self.noob_delay and len(self.noob_delay) - 1 <= n:
             contest_weight *= self.noob_delay[n]
         
         return contest_weight
@@ -650,15 +659,20 @@ cdef class EloMMR:
         return sqrt(discrete_perf + continuous_perf)
 
     cdef double compute_sig_drift(self, double weight, double delta_seconds):
-        cdef discrete_drift = weight * self.sig_limit ** 2
-        cdef continuous_drift = self.drift_per_day * delta_seconds / SECS_PER_DAY
+        cdef double discrete_drift = weight * self.sig_limit ** 2
+        cdef double continuous_drift = self.drift_per_day * delta_seconds / SECS_PER_DAY
 
         return sqrt(discrete_drift + continuous_drift)
 
     
-    cdef object subsample(self, tuple terms, double rating, unsigned int num_samples, double subsample_bucket):
+    cdef object subsample(self, list terms, double rating, unsigned int num_samples, double subsample_bucket):
         terms = sorted(terms, key=lambda x: x[0].mu)
-        beg = bisect_left(terms, (rating, None), key=lambda x: (x[0].mu, x[1]))
+
+
+
+
+
+        beg = binary_search_by(terms, rating, subsample_bucket)
         end = beg + 1
 
         expand = (num_samples - max(0, end - beg) + 1) // 2
@@ -671,7 +685,7 @@ cdef class EloMMR:
 
         return range(beg, end)
 
-    cdef void round_update(self, ContestRatingParams rating_params, tuple standings):
+    cpdef list round_update(self, ContestRatingParams rating_params, list standings):
         """Update ratings for a single round.
 
         Update ratings due to waiting period between contests,
@@ -705,23 +719,12 @@ cdef class EloMMR:
             else:
                 player.add_noise_and_collapse(sig_drift)
             
-            base_terms.append([player.approximate_posterior(sig_perf), low])
+            base_terms.append((player.approximate_posterior(sig_perf), low))
             
-            # Very uncertain of this code block
-            base_terms = [list(item) for item in base_terms]
 
-            # Bucket by 'mu'
-            base_terms.sort(key=lambda a: bucket(a[0][0], self.subsample_bucket))
-            for mu_key, mu_items in groupby(base_terms, key=lambda a: bucket(a[0][0], self.subsample_bucket)):
-                # Bucket by 'sig' with same 'mu'
-                mu_items = sorted(mu_items, key=lambda a: bucket(a[0][1], self.subsample_bucket))
-                for sig_key, sig_items in groupby(mu_items, key=lambda a: bucket(a[0][1], self.subsample_bucket)):
-                    # Sort by 'a[1]' with same 'mu' and 'sig'
-                    sig_items = sorted(sig_items, key=lambda a: a[1])
-
-            # Convert lists back to tuples
-            base_terms = [tuple(item) for item in base_terms]
-            # End of very uncertain code block
+            # Bucket by 'mu', then by 'sigma', then by 'rank'
+            base_terms = sorted(base_terms, key=self.sorting)
+            # base_terms = sorted(base_terms, key=lambda x: (x[0].mu, x[0].sig, x[1])                 
 
             normal_terms = []
 
@@ -732,10 +735,10 @@ cdef class EloMMR:
                     continue
 
                 last_term, ranks = normal_terms[-1]
-                if same_bucket(last_term.mu, term.mu, self.subsample_bucket) and same_bucket(last_term.sigma, term.sigma, self.subsample_bucket):
+                if same_bucket(last_term.mu, term.mu, self.subsample_bucket) and same_bucket(last_term.sig, term.sig, self.subsample_bucket):
                     number_of_ranks = len(ranks)
                     last_term.mu = (number_of_ranks * last_term.mu + term.mu) / (number_of_ranks + 1)
-                    last_term.sigma = (number_of_ranks * last_term.sigma + term.sigma) / (number_of_ranks + 1)
+                    last_term.sig = (number_of_ranks * last_term.sig + term.sig) / (number_of_ranks + 1)
                     ranks.append(low)
                     continue
 
@@ -744,7 +747,7 @@ cdef class EloMMR:
             # Create the equivalent logistic terms.
             tanh_terms = []
             for (rating, ranks) in normal_terms:
-                tanh_terms.append((rating.to_tanh_term, ranks))
+                tanh_terms.append((rating.to_tanh_term(), ranks))
 
             idx_len_max = 9999
 
@@ -753,20 +756,19 @@ cdef class EloMMR:
                 player_mu = player.approx_posterior.mu
                 idx_subsample = self.subsample(normal_terms, player_mu, 
                                                self.subsample_size, self.subsample_bucket)
-                idx_len_max = len(idx_subsample) if idx_subsample is not None else SIZE_MAX
+                idx_len_upper_bound = len(idx_subsample) if idx_subsample is not None else SIZE_MAX
 
                 if idx_len_max < idx_len_upper_bound:
                     idx_len_max = idx_len_upper_bound
                     warnings.warn("Subsampling %ld opponents might be slow; consider decreasing subsample_size." % idx_len_upper_bound)
 
                 bounds = (-6000, 9000)
-                weight = self.compute_weight(rating_params, player.times_played_excl())
+                weight = self.compute_weight(rating_params.weight, player.times_played_excl())
                 sig_perf = self.compute_sig_perf(weight)
 
                 if isinstance(self.variant, Gaussian):
-                    idx_subsample = [normal_terms[i] for i in idx_subsample]
 
-                    f = get_formula(idx_subsample[:], my_rank, self.split_ties)
+                    f = get_formula([normal_terms[i] for i in idx_subsample], my_rank, self.split_ties)
 
                     mu_perf = solve_newton(bounds, f)
                     player.update_rating_with_normal(
@@ -774,15 +776,16 @@ cdef class EloMMR:
                     )
                 elif isinstance(self.variant, Logistic):
 
-                    idx_subsample = [tanh_terms[i] for i in idx_subsample]
 
-                    f = get_formula(idx_subsample[:], my_rank, self.split_ties)
+                    f = get_formula([tanh_terms[i] for i in idx_subsample], my_rank, self.split_ties)
 
                     mu_perf = min(solve_newton(bounds, f), rating_params.perf_ceiling)
                     player.update_rating_with_logistic(
                         Rating(mu_perf, sig_perf), 
                         self.subsample_size
                     )
+
+        return standings
 
 cdef object get_formula(list idx_subsample_copy, int my_rank, bint split_ties):
     """Return callable that can be passed as formula into the solve_newton
@@ -803,7 +806,7 @@ cdef object get_formula(list idx_subsample_copy, int my_rank, bint split_ties):
 
     return f
 
-cdef EloMMR construct_elo_mmr_default_fast():
+cpdef EloMMR construct_elo_mmr_default_fast():
     return EloMMR(
         weight_limit=0.2,
         sig_limit=80,
@@ -812,7 +815,7 @@ cdef EloMMR construct_elo_mmr_default_fast():
         variant=Logistic(1.0)
     )
 
-cdef EloMMR construct_elo_mmr_default_gaussian():
+cpdef EloMMR construct_elo_mmr_default_gaussian():
     return EloMMR(
         weight_limit=0.2,
         sig_limit=80,
@@ -821,7 +824,7 @@ cdef EloMMR construct_elo_mmr_default_gaussian():
         variant=Gaussian()
     )
 
-cdef EloMMR construct_elo_mmr_gaussian_fast():
+cpdef EloMMR construct_elo_mmr_gaussian_fast():
     return EloMMR(
         weight_limit=0.2,
         sig_limit=80,
@@ -861,6 +864,42 @@ cdef int same_bucket(double a, double b, double width):
 cdef OrderingType cmp_by_bucket(double a, double b, double width):
     return create_ordering(bucket(a, width), bucket(b, width))
 
+cpdef object wrapper():
+    return sort_on_mu_sig_rank(9)
+
+cdef object sort_on_mu_sig_rank(double subsample_bucket):
+    """Convert a cmp= function into a key= function"""
+    cdef object func = cmp_by_bucket
+    
+    class K(object):
+        __slots__ = ['obj']
+        def __init__(self, tuple obj):
+            self.obj = obj
+        def __lt__(self, other):
+            if func(self.obj[0].mu, other.obj[0].mu, subsample_bucket) != 0:
+                return func(self.obj[0].mu, other.obj[0].mu, subsample_bucket) < 0
+            elif func(self.obj[0].sig, other.obj[0].sig, subsample_bucket) != 0:
+                return func(self.obj[0].sig, other.obj[0].sig, subsample_bucket) < 0
+            else:
+                return self.obj[1] < other.obj[1]
+        def __gt__(self, other):
+            if func(self.obj[0].mu, other.obj[0].mu, subsample_bucket) != 0:
+                return func(self.obj[0].mu, other.obj[0].mu, subsample_bucket) > 0
+            elif func(self.obj[0].sig, other.obj[0].sig, subsample_bucket) != 0:
+                return func(self.obj[0].sig, other.obj[0].sig, subsample_bucket) > 0
+            else:
+                return self.obj[1] > other.obj[1]
+        def __eq__(self, other):
+            return func(self.obj[0].mu, other.obj[0].mu, subsample_bucket) == 0 and func(self.obj[0].sig, other.obj[0].sig, subsample_bucket) == 0 and self.obj[1] == other.obj[1]
+
+
+        def __le__(self, other):
+            return self < other or self == other
+        def __ge__(self, other):
+            return self > other or self == other
+        __hash__ = None
+        
+    return K
 
 cdef OrderingType create_ordering(int a, int b):
     if a < b:
@@ -961,4 +1000,21 @@ cpdef void simulate_contest(dict players, Contest contest, EloMMR system,
         standings.append((player, low, high))
 
     system.round_update(contest.rating_params, standings)
-        
+
+
+cdef int binary_search_by(list terms, double rating, double subsample_bucket):
+    cdef int lo, mid, hi
+    cdef double mu
+
+    lo = 0
+    hi = len(terms)
+
+    while lo < hi:
+        mid = (lo+hi)//2
+        mu = terms[mid][0].mu
+        if cmp_by_bucket(mu, rating, subsample_bucket) > 0:
+            hi = mid
+        else:
+            lo = mid + 1
+
+    return lo
